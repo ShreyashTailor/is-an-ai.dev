@@ -2,6 +2,10 @@
     "user": {
         "username": "tr1x_em"
     },
+    "description": {
+        "purpose": "Discord"
+    },
+
     "subdomain": "_discord.trix",
     "records": [
         {
