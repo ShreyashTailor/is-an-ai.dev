@@ -48,7 +48,7 @@ for (const file of files) {
         if (!data.user[k]) fail(`${file}: user.${k} required`);
     }
 
-    // subdomain (underscore allowed as requested)
+    // subdomain
     if (!/^[a-z0-9-_]+$/.test(data.subdomain)) {
         fail(`${file}: invalid subdomain`);
     }
