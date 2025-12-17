@@ -1,180 +1,204 @@
 import fs from "fs";
 
-// Constants
 const CF_API = "https://api.cloudflare.com/client/v4";
-const { CF_API_TOKEN, CF_ZONE_ID, CF_DOMAIN } = process.env;
+const { CF_API_TOKEN, CF_ZONE_ID } = process.env;
 
 const headers = {
     Authorization: `Bearer ${CF_API_TOKEN}`,
     "Content-Type": "application/json",
 };
 
-// Get changes from file
-const changes = fs
-    .readFileSync("changes.txt", "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => {
-        const [status, file] = l.split(/\s+/);
-        return { status, file };
-    })
-    .filter((c) => c.file.startsWith("domains/") && c.file.endsWith(".json"));
+// Helpers
 
 async function cf(path, options = {}) {
-    const r = await fetch(`${CF_API}${path}`, {
+    const res = await fetch(`${CF_API}${path}`, {
         ...options,
         headers,
     });
-    const j = await r.json();
-    if (!j.success) {
-        console.error(
-            "Cloudflare API Error:",
-            JSON.stringify(j.errors, null, 2),
-        );
-        throw new Error(`Cloudflare API call failed for path: ${path}`);
+
+    const json = await res.json();
+
+    if (!json.success) {
+        console.error("❌ Cloudflare API error:", JSON.stringify(json.errors, null, 2));
+        throw new Error(`Cloudflare API failed: ${path}`);
     }
-    return j.result;
+
+    return json.result;
 }
 
-// Fetch all existing records for the entire zone
 async function listAllRecords() {
-    const allRecords = [];
+    const records = [];
     let page = 1;
+
     while (true) {
-        const result = await cf(
-            `/zones/${CF_ZONE_ID}/dns_records?per_page=500&page=${page}`,
+        const batch = await cf(
+            `/zones/${CF_ZONE_ID}/dns_records?per_page=500&page=${page}`
         );
-        const records = Array.isArray(result) ? result : [];
-        allRecords.push(...records);
-        if (records.length < 500) break;
+        records.push(...batch);
+        if (batch.length < 500) break;
         page++;
     }
-    return allRecords;
+
+    return records;
 }
 
-async function getRecordsForSubdomain(sub, allRecords) {
-    const subdomainSuffix = `${sub}.${CF_DOMAIN}`;
-    // Filter records belonging to the target subdomain
-    return (allRecords || []).filter(
-        (r) =>
-            (r.name === subdomainSuffix ||
-                r.name.endsWith(`.${subdomainSuffix}`)) &&
-            r.type !== "NS",
+function recordsForSubdomain(sub, all, domain) {
+    const suffix = `${sub}.${domain}`;
+    return all.filter(
+        r =>
+            (r.name === suffix || r.name.endsWith(`.${suffix}`)) &&
+            r.type !== "NS"
     );
 }
 
-async function deleteSubdomainRecords(sub) {
-    console.log(`Deleting all records for subdomain: ${sub}`);
-    const allRecords = await listAllRecords();
-    const recordsToDelete = await getRecordsForSubdomain(sub, allRecords);
+// Payload Builder
 
-    for (const r of recordsToDelete) {
-        console.log(`   - Deleting ${r.type} record: ${r.name}`);
-        await cf(`/zones/${CF_ZONE_ID}/dns_records/${r.id}`, {
-            method: "DELETE",
-        });
+function buildPayload(r) {
+    const type = r.type;
+
+    const payload = {
+        type,
+        name: r.name,
+        ttl: 1,
+    };
+
+    if (["A", "AAAA", "CNAME"].includes(type)) {
+        payload.proxied = r.proxied ?? false;
     }
+
+    if (["A", "AAAA", "CNAME", "TXT", "URL"].includes(type)) {
+        payload.content = r.value;
+    }
+
+    if (type === "MX") {
+        payload.content = r.target;
+        payload.priority = r.priority;
+    }
+
+    if (type === "SRV") {
+        payload.data = {
+            service: r.name.split(".")[0],
+            proto: r.name.split(".")[1],
+            name: r.name.split(".").slice(2).join("."),
+            priority: r.priority,
+            weight: r.weight,
+            port: r.port,
+            target: r.target,
+        };
+    }
+
+    if (type === "CAA") {
+        payload.data = {
+            flags: r.flags,
+            tag: r.tag,
+            value: r.value,
+        };
+    }
+
+    if (type === "DS") {
+        payload.data = {
+            key_tag: r.key_tag,
+            algorithm: r.algorithm,
+            digest_type: r.digest_type,
+            digest: r.digest,
+        };
+    }
+
+    if (type === "TLSA") {
+        payload.data = {
+            usage: r.usage,
+            selector: r.selector,
+            matching_type: r.matching_type,
+            certificate: r.certificate,
+        };
+    }
+
+    return payload;
 }
 
-async function applyFile(file) {
-    const raw = fs.readFileSync(file, "utf8");
-    const data = JSON.parse(raw);
-    const subdomain = data.subdomain;
+function sameRecord(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+}
 
-    const allExistingRecords = await listAllRecords();
-    const existingRecordsForSubdomain = await getRecordsForSubdomain(
-        subdomain,
-        allExistingRecords,
-    );
+// Sync
+async function applyFile(file, domain) {
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    const sub = data.subdomain;
 
-    // Identify records to keep, update, or create
-    const recordsToKeep = new Set();
+    console.log(`🔄 Syncing ${sub}`);
+
+    const all = await listAllRecords();
+    const existing = recordsForSubdomain(sub, all, domain);
+
+    const keep = new Set();
 
     for (const r of data.records) {
-        const cfName = r.name;
-        // const cfName = r.name.endsWith(CF_DOMAIN) ? r.name : `${r.name}.${CF_DOMAIN}`;
-        const cfType = r.type;
-        const isComplex = ["SRV", "CAA", "PTR"].includes(cfType);
+        const payload = buildPayload(r);
 
-        // Construct the payload using all optional fields (priority, ttl, data)
-        const basePayload = {
-            type: cfType,
-            name: cfName,
-            // Use 'content' for standard records, and 'data' for SRV, CAA and PTR records
-            content: isComplex ? undefined : r.value,
-            data: isComplex ? r.data : undefined,
-            proxied: r.proxied ?? false,
-            ttl: r.ttl ?? 1,
-            ...(r.priority !== undefined ? { priority: r.priority } : {}), // For MX, SRV
-        };
-
-        // Clean up undefined fields for a cleaner API request
-        Object.keys(basePayload).forEach(
-            (key) => basePayload[key] === undefined && delete basePayload[key],
-        );
-
-        // Check if a matching record already exists
-        const match = existingRecordsForSubdomain.find(
-            (e) => e.type === cfType && e.name === cfName,
+        const match = existing.find(
+            e => e.type === payload.type && e.name === payload.name
         );
 
         if (match) {
-            recordsToKeep.add(match.id);
+            keep.add(match.id);
 
-            // Only update on change
-            const requiresUpdate =
-                match.content !== basePayload.content ||
-                match.proxied !== basePayload.proxied ||
-                match.ttl !== basePayload.ttl ||
-                (match.priority !== basePayload.priority &&
-                    (cfType === "MX" || cfType === "SRV")) ||
-                JSON.stringify(match.data) !== JSON.stringify(basePayload.data);
-
-            if (requiresUpdate) {
-                console.log(
-                    `   - Updating existing ${cfType} record: ${cfName}`,
-                );
+            if (!sameRecord(match, payload)) {
+                console.log(`   ✏️ Updating ${payload.type} ${payload.name}`);
                 await cf(`/zones/${CF_ZONE_ID}/dns_records/${match.id}`, {
                     method: "PUT",
-                    body: JSON.stringify(basePayload),
+                    body: JSON.stringify(payload),
                 });
             }
         } else {
-            console.log(`   - Creating new ${cfType} record: ${cfName}`);
+            console.log(`   ➕ Creating ${payload.type} ${payload.name}`);
             await cf(`/zones/${CF_ZONE_ID}/dns_records`, {
                 method: "POST",
-                body: JSON.stringify(basePayload),
+                body: JSON.stringify(payload),
             });
         }
     }
 
-    // Delete records that are not in the new JSON
-    const recordsToDelete = existingRecordsForSubdomain.filter(
-        (r) => !recordsToKeep.has(r.id),
-    );
-
-    for (const r of recordsToDelete) {
-        console.log(
-            `   - Deleting old ${r.type} record (drift cleanup): ${r.name}`,
-        );
-        await cf(`/zones/${CF_ZONE_ID}/dns_records/${r.id}`, {
-            method: "DELETE",
-        });
-    }
-}
-
-// Main Loop
-for (const c of changes) {
-    if (c.file.startsWith("domains/")) {
-        const sub = c.file.replace("domains/", "").replace(".json", "");
-
-        if (c.status === "D") {
-            // File deleted: Delete all corresponding DNS records
-            await deleteSubdomainRecords(sub);
-        } else if (c.status === "A" || c.status === "M") {
-            // File added/modified: Synchronization of records for this subdomain
-            console.log(`Applying changes for subdomain: ${sub}`);
-            await applyFile(c.file);
+    // Cleanup
+    for (const r of existing) {
+        if (!keep.has(r.id)) {
+            console.log(`   🗑️ Deleting ${r.type} ${r.name}`);
+            await cf(`/zones/${CF_ZONE_ID}/dns_records/${r.id}`, {
+                method: "DELETE",
+            });
         }
     }
 }
+
+// Main
+
+const { CF_DOMAIN } = process.env;
+
+const changes = fs
+    .readFileSync("changes.txt", "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map(line => {
+        const [status, file] = line.split(/\s+/);
+        return { status, file };
+    })
+    .filter(c => c.file.startsWith("domains/") && c.file.endsWith(".json"));
+
+for (const c of changes) {
+    const sub = c.file.replace("domains/", "").replace(".json", "");
+
+    if (c.status === "D") {
+        console.log(`🔥 Removing ${sub}`);
+        const all = await listAllRecords();
+        const records = recordsForSubdomain(sub, all, CF_DOMAIN);
+
+        for (const r of records) {
+            await cf(`/zones/${CF_ZONE_ID}/dns_records/${r.id}`, {
+                method: "DELETE",
+            });
+        }
+    } else {
+        await applyFile(c.file, CF_DOMAIN);
+    }
+}
+
+console.log("✅ Cloudflare DNS sync complete");
