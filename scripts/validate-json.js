@@ -136,7 +136,7 @@ for (const file of files) {
         fail(`${file}: at least one DNS record is required`);
     }
 
-    if (!MAX_RECORDS && data.records.length > MAX_RECORDS) {
+    if (MAX_RECORDS && data.records.length > MAX_RECORDS) {
         fail(`${file}: maximum ${MAX_RECORDS} DNS records allowed`);
     }
 
