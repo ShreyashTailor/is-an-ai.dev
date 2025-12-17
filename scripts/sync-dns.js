@@ -116,8 +116,12 @@ function buildPayload(r) {
     return payload;
 }
 
-function sameRecord(a, b) {
-    return JSON.stringify(a) === JSON.stringify(b);
+function sameRecord(existing, payload) {
+    // Only compare keys present in the generated payload
+    return Object.keys(payload).every(key => {
+        if (key === 'data') return JSON.stringify(existing.data) === JSON.stringify(payload.data);
+        return existing[key] === payload[key];
+    });
 }
 
 // Sync
