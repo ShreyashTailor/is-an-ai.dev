@@ -1,3 +1,6 @@
+# NOTE
+Our service will be releasing soon! Please avoid certaing a PR now and wait for few days as when we are done with testing, we'll be wiping all records and creating a new repo and finally publishing it. You may join one of our discord servers [Linux Bunker](https://discord.gg/Qw9m5SmzBJ) for further updates.
+
 # 🛸 is-an-ai.dev
 
 > **Personalized subdomains for you!** > Simple. Open Source. Free forever.
