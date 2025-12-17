@@ -51,7 +51,11 @@ async function syncRedirects(sub, urlRecords, domain) {
         expression: `(http.host eq "${hostname}")`,
         action: "redirect",
         action_parameters: {
-            from_value: { status_code: 301, target_url: { value: r.value }, preserve_query_string: true }
+            from_value: {
+                target_url: { value: r.value },
+                status_code: 301,
+              preserve_query_string: true
+           }
         }
     }));
 
