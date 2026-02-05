@@ -12,6 +12,24 @@
       "name": "shreyash",
       "value": "shreyashtailor.github.io",
       "proxied": false
-    }
+    },
+    {
+    "type": "MX",
+    "name": "shreyash",
+    "value": "mx1.improvmx.com",
+    "priority": 10
+},
+{
+    "type": "MX",
+    "name": "shreyash",
+    "value": "mx2.improvmx.com",
+    "priority": 20
+},
+{
+    "type": "TXT",
+    "name": "shreyash",
+    "value": "v=spf1 include:spf.improvmx.com ~all"
+}
+
   ]
 }
